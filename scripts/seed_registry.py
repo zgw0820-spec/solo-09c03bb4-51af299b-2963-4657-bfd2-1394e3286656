@@ -26,11 +26,13 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://localhost:5000").rstrip("/")
 
@@ -160,8 +162,10 @@ def push_index(repo: str, architectures: list[str], layer: bytes,
         digest_of(canonical(index)), OCI_INDEX, index
     )
     if delete_arch is not None:
-        # Simulate a child manifest that the index promises but which can no
-        # longer be fetched by digest (registry delete is enabled).
+        # Simulate a child manifest that the index promises but can no longer
+        # be fetched by digest (registry delete is enabled).  Callers that
+        # also want a tag pointing at this index must create the tag *first*:
+        # registry 2.8 re-validates referenced children on manifest PUT.
         pusher.delete_manifest(child_digests[delete_arch])
     return index_digest, child_digests
 
@@ -197,10 +201,14 @@ def cmd_seed(_args: argparse.Namespace) -> None:
     tag_manifest("apps/arm-only", "v1", digest_arm)
     summary.append(("apps/arm-only:v1", digest_arm))
 
-    digest_broken, _ = push_index(
-        "apps/broken", ["amd64", "arm64"], layer, delete_arch="amd64"
+    # Broken-child fixture: create the tag while every child exists, then
+    # delete the amd64 child manifest by digest so the index still resolves
+    # but that child returns 404.
+    digest_broken, broken_children = push_index(
+        "apps/broken", ["amd64", "arm64"], layer
     )
     tag_manifest("apps/broken", "v1", digest_broken)
+    RepoPusher("apps/broken").delete_manifest(broken_children["amd64"])
     summary.append(("apps/broken:v1", digest_broken))
 
     print("seeded fixtures at", REGISTRY_URL)
@@ -224,18 +232,271 @@ def cmd_reset(args: argparse.Namespace) -> None:
     cmd_seed(args)
 
 
+# ---------------------------------------------------------------------------
+# Backfill fixture: shared layer across platforms + one per-arch layer
+# ---------------------------------------------------------------------------
+
+
+def deterministic_tar_layer(filename: str, content: bytes) -> bytes:
+    """A byte-for-byte deterministic uncompressed tar layer."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+        info = tarfile.TarInfo(name=filename)
+        info.size = len(content)
+        info.mtime = 0
+        info.uid = 0
+        info.gid = 0
+        info.uname = ""
+        info.gname = ""
+        tf.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
+def push_backfill_index(
+    repo: str, layer_bytes: dict[str, bytes]
+) -> tuple[str, dict[str, str]]:
+    """Push an amd64+arm64 index whose children share the 'common' layer."""
+    pusher = RepoPusher(repo)
+    descriptors = []
+    child_digests: dict[str, str] = {}
+    for arch in ("amd64", "arm64"):
+        ordered_names = ["common", f"{arch}-only"]
+        layer_descriptors = []
+        diff_ids = []
+        for name in ordered_names:
+            data = layer_bytes[name]
+            descriptor = pusher.upload_blob(data)
+            descriptor["mediaType"] = OCI_LAYER
+            layer_descriptors.append(descriptor)
+            diff_ids.append(digest_of(data))
+
+        config = canonical(
+            {
+                "architecture": arch,
+                "os": "linux",
+                "config": {},
+                "rootfs": {"type": "layers", "diff_ids": diff_ids},
+            }
+        )
+        config_descriptor = pusher.upload_blob(config)
+        config_descriptor["mediaType"] = OCI_CONFIG
+
+        child = {
+            "schemaVersion": 2,
+            "mediaType": OCI_MANIFEST,
+            "config": config_descriptor,
+            "layers": layer_descriptors,
+        }
+        child_digest = pusher.put_manifest(
+            digest_of(canonical(child)), OCI_MANIFEST, child
+        )
+        child_digests[arch] = child_digest
+        descriptors.append(
+            {
+                "mediaType": OCI_MANIFEST,
+                "digest": child_digest,
+                "size": len(canonical(child)),
+                "platform": {"os": "linux", "architecture": arch},
+            }
+        )
+
+    index = {
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX,
+        "manifests": descriptors,
+    }
+    index_digest = pusher.put_manifest(
+        digest_of(canonical(index)), OCI_INDEX, index
+    )
+    return index_digest, child_digests
+
+
+def cmd_seed_backfill(_args: argparse.Namespace) -> None:
+    layer_bytes = {
+        "common": deterministic_tar_layer(
+            "common.txt", b"shared-layer-across-platforms-v1\n"
+        ),
+        "amd64-only": deterministic_tar_layer("arch.txt", b"amd64-layer\n"),
+        "arm64-only": deterministic_tar_layer("arch.txt", b"arm64-layer\n"),
+    }
+
+    golden_digest, _ = push_backfill_index("images/golden", layer_bytes)
+    target_digest, _ = push_backfill_index("images/target", layer_bytes)
+    tag_manifest("images/golden", "v1", golden_digest)
+    tag_manifest("images/target", "v1", target_digest)
+
+    # A candidate source that only has two of the three layers: mounting the
+    # amd64-only layer from it yields an upload session (202), which the
+    # backfill API must cancel before trying images/golden.
+    partial = RepoPusher("images/partial")
+    for name in ("common", "arm64-only"):
+        partial.upload_blob(layer_bytes[name])
+
+    if golden_digest != target_digest:
+        # Same canonical bytes must produce the same index digest.
+        print(
+            f"warning: golden {golden_digest} != target {target_digest}",
+            file=sys.stderr,
+        )
+
+    print("seeded backfill fixtures at", REGISTRY_URL)
+    print(f"  images/target:v1 / @{target_digest}")
+    print(f"  images/golden:v1 / @{golden_digest} (all 3 layers)")
+    print("  images/partial        (common + arm64 layer only)")
+    print()
+    print("next:")
+    print("  python3 scripts/seed_registry.py break-layers")
+    print(
+        "  python3 scripts/backfill.py "
+        f"--target localhost:5000/images/target@{target_digest} \\"
+    )
+    print("      --source images/partial --source images/golden")
+
+
+def head_blob_status(repo: str, digest: str) -> int:
+    request_obj = urllib.request.Request(
+        f"{REGISTRY_URL}/v2/{repo}/blobs/{digest}", method="HEAD"
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def collect_layer_digests(repo: str, index_digest: str) -> list[str]:
+    _resp, _headers, index_body = _request_bytes(
+        "GET",
+        f"{REGISTRY_URL}/v2/{repo}/manifests/{index_digest}",
+        headers={"Accept": OCI_INDEX},
+    )
+    index = json.loads(index_body)
+    digests: set[str] = set()
+    for descriptor in index.get("manifests", []):
+        child_digest = descriptor["digest"]
+        _r, _h, child_body = _request_bytes(
+            "GET",
+            f"{REGISTRY_URL}/v2/{repo}/manifests/{child_digest}",
+            headers={"Accept": OCI_MANIFEST},
+        )
+        child = json.loads(child_body)
+        for layer in child.get("layers", []):
+            digests.add(layer["digest"])
+    return sorted(digests)
+
+
+def _request_bytes(method, url, data=None, headers=None):
+    req = urllib.request.Request(
+        url, data=data, method=method, headers=headers or {}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.status, dict(response.headers), response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"{method} {url} -> HTTP {exc.code}: {body}") from exc
+
+
+def cmd_break_layers(args: argparse.Namespace) -> None:
+    """Remove target repository layer links to simulate 404 layers.
+
+    Cross-repository mounts repair exactly this damage without moving layer
+    content.  With ``--fs-root`` files are removed directly (local registry
+    binary / bind mount); otherwise ``docker compose exec`` is used against
+    the registry service.
+    """
+    repo = args.repo
+    index_digest = args.index_digest
+    if not index_digest:
+        resp = request(
+            "GET",
+            f"{REGISTRY_URL}/v2/{repo}/manifests/v1",
+            headers={"Accept": OCI_INDEX},
+        )
+        index_digest = resp.headers["Docker-Content-Digest"]
+
+    digests = collect_layer_digests(repo, index_digest)
+    v2_root = args.container_root
+    link_paths = [
+        f"{v2_root}/repositories/{repo}/_layers/sha256/"
+        f"{digest.split(':', 1)[1]}/link"
+        for digest in digests
+    ]
+
+    if args.fs_root:
+        host_paths = [
+            os.path.join(
+                args.fs_root,
+                "repositories",
+                repo,
+                "_layers",
+                "sha256",
+                digest.split(":", 1)[1],
+                "link",
+            )
+            for digest in digests
+        ]
+        for path in host_paths:
+            try:
+                os.remove(path)
+                print("removed", path)
+            except FileNotFoundError:
+                print("already absent", path)
+    else:
+        compose_file = (
+            args.compose_file
+            or Path(__file__).resolve().parent.parent / "docker-compose.yml"
+        )
+        command = [
+            "docker", "compose", "-f", str(compose_file),
+            "exec", "-T", "-u", "0", args.service,
+            "rm", "-f", *link_paths,
+        ]
+        print("+", " ".join(command))
+        subprocess.run(command, check=True)
+
+    print(f"\nlayer HEAD status in {repo} after link removal:")
+    for digest in digests:
+        status = head_blob_status(repo, digest)
+        print(f"  HTTP {status}  {digest}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("seed")
     sub.add_parser("retag-demo")
     sub.add_parser("reset-demo")
+    sub.add_parser("seed-backfill")
+
+    break_parser = sub.add_parser(
+        "break-layers",
+        help="remove target repo layer links to simulate layer 404s",
+    )
+    break_parser.add_argument("--repo", default="images/target")
+    break_parser.add_argument("--index-digest", default=None)
+    break_parser.add_argument(
+        "--fs-root",
+        default=None,
+        help="local .../docker/registry/v2 directory for direct removal "
+             "(standalone registry binary / bind mount)",
+    )
+    break_parser.add_argument(
+        "--container-root",
+        default="/var/lib/registry/docker/registry/v2",
+        help="in-container v2 storage root",
+    )
+    break_parser.add_argument("--service", default="registry")
+    break_parser.add_argument("--compose-file", default=None)
+
     args = parser.parse_args()
 
     handlers = {
         "seed": cmd_seed,
         "retag-demo": cmd_retag,
         "reset-demo": cmd_reset,
+        "seed-backfill": cmd_seed_backfill,
+        "break-layers": cmd_break_layers,
     }
     try:
         handlers[args.command](args)

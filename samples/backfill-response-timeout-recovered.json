@@ -1,0 +1,40 @@
+{
+  "target": "127.0.0.1:5000/images/target@sha256:4c8e0b25f516151720991f819a64a06650329ccfe7695dd38df656321ff829ba",
+  "registry": "127.0.0.1:5000",
+  "repository": "images/target",
+  "indexDigest": "sha256:4c8e0b25f516151720991f819a64a06650329ccfe7695dd38df656321ff829ba",
+  "sources": [
+    "images/golden"
+  ],
+  "complete": true,
+  "summary": {
+    "layers": 1,
+    "present": 1,
+    "alreadyPresent": 0,
+    "mounted": 1,
+    "failed": 0
+  },
+  "warnings": [],
+  "layers": [
+    {
+      "digest": "sha256:952fac46ede48e9dffd7f10195e3a8acec6ee5d7b468b69df0b62a6e4f298fb4",
+      "size": 116,
+      "status": "present",
+      "alreadyPresent": false,
+      "mountAttempted": true,
+      "mountedFrom": "images/golden",
+      "resolvedBy": "verified-after-mount-timeout",
+      "attempts": [
+        {
+          "source": "images/golden",
+          "result": "timeout",
+          "detail": "挂载请求超时: TimeoutError: timed out"
+        }
+      ],
+      "reasons": []
+    }
+  ],
+  "failures": [],
+  "_note": "Generated against the stdlib slow-mount fake registry because the real registry mount is too fast to time out naturally.",
+  "_elapsedSeconds": 0.21
+}

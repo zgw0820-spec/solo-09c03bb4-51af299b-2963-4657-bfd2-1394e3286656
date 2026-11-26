@@ -1,0 +1,103 @@
+{
+  "target": "localhost:5000/images/target@sha256:be7d09a204d1c2eded6087c96cb3c3ea0db66a050ad88614c5c39678491ffab1",
+  "registry": "localhost:5000",
+  "repository": "images/target",
+  "indexDigest": "sha256:be7d09a204d1c2eded6087c96cb3c3ea0db66a050ad88614c5c39678491ffab1",
+  "sources": [
+    "images/arm-only"
+  ],
+  "complete": false,
+  "summary": {
+    "layers": 3,
+    "present": 0,
+    "alreadyPresent": 0,
+    "mounted": 0,
+    "failed": 3
+  },
+  "warnings": [],
+  "layers": [
+    {
+      "digest": "sha256:50817642918953e79c6a9758657feda644f3c4646e73da9c34da186f6804c8b6",
+      "size": 10240,
+      "status": "failed",
+      "alreadyPresent": false,
+      "mountAttempted": true,
+      "mountedFrom": null,
+      "resolvedBy": null,
+      "attempts": [
+        {
+          "source": "images/arm-only",
+          "result": "upload_session",
+          "detail": "源仓库无法直接挂载，仓库返回了上传会话",
+          "sessionCancelled": true
+        }
+      ],
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    },
+    {
+      "digest": "sha256:5ab601bfc7bec6f2654ddbab337d046861f39613148ddbf74eb21675b09202e8",
+      "size": 10240,
+      "status": "failed",
+      "alreadyPresent": false,
+      "mountAttempted": true,
+      "mountedFrom": null,
+      "resolvedBy": null,
+      "attempts": [
+        {
+          "source": "images/arm-only",
+          "result": "upload_session",
+          "detail": "源仓库无法直接挂载，仓库返回了上传会话",
+          "sessionCancelled": true
+        }
+      ],
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    },
+    {
+      "digest": "sha256:62c9b3e6236430a3e24c12dc62205184592f9751abd482f7e30b82a97a77e2b3",
+      "size": 10240,
+      "status": "failed",
+      "alreadyPresent": false,
+      "mountAttempted": true,
+      "mountedFrom": null,
+      "resolvedBy": null,
+      "attempts": [
+        {
+          "source": "images/arm-only",
+          "result": "upload_session",
+          "detail": "源仓库无法直接挂载，仓库返回了上传会话",
+          "sessionCancelled": true
+        }
+      ],
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "digest": "sha256:50817642918953e79c6a9758657feda644f3c4646e73da9c34da186f6804c8b6",
+      "size": 10240,
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    },
+    {
+      "digest": "sha256:5ab601bfc7bec6f2654ddbab337d046861f39613148ddbf74eb21675b09202e8",
+      "size": 10240,
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    },
+    {
+      "digest": "sha256:62c9b3e6236430a3e24c12dc62205184592f9751abd482f7e30b82a97a77e2b3",
+      "size": 10240,
+      "reasons": [
+        "回查目标: 仍返回 404"
+      ]
+    }
+  ]
+}

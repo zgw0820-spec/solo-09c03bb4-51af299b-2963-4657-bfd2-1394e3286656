@@ -1,0 +1,7 @@
+{
+  "target": "localhost:5000/images/target@sha256:be7d09a204d1c2eded6087c96cb3c3ea0db66a050ad88614c5c39678491ffab1",
+  "sources": [
+    "images/partial",
+    "images/golden"
+  ]
+}

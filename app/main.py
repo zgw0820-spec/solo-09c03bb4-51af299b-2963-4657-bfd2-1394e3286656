@@ -8,8 +8,13 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from .admission.backfill import (
+    BackfillRequestError,
+    BackfillService,
+)
 from .admission.config import settings
 from .admission.policy import AdmissionFailure, build_patches
 from .admission.registry import RegistryClient
@@ -17,7 +22,12 @@ from .admission.registry import RegistryClient
 logger = logging.getLogger("image-digest-webhook")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="image-digest-admission", version="1.0.0")
+app = FastAPI(title="image-digest-admission", version="1.1.0")
+
+# One process-wide service so the keyed per-(repo, layer) locks are shared by
+# all /backfill requests handled by this process.  The lock map holds no
+# success/failure state beyond the mutex itself.
+backfill_service = BackfillService(settings)
 
 ADMISSION_API_VERSION = "admission.k8s.io/v1"
 ADMISSION_KIND = "AdmissionReview"
@@ -30,6 +40,28 @@ class AdmissionReviewPayload(BaseModel):
     apiVersion: str | None = None
     kind: str | None = None
     request: dict[str, Any] | None = None
+
+
+class BackfillRequestBody(BaseModel):
+    # Accept a few natural field spellings; the documented contract is
+    # {"target": ..., "sources": [...]}.
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    target: str = Field(
+        ...,
+        validation_alias=AliasChoices(
+            "target", "target_reference", "targetRef", "reference"
+        ),
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "sources",
+            "source_repositories",
+            "sourceRepositories",
+            "source_repos",
+        ),
+    )
 
 
 def _allow(uid: str | None) -> dict[str, Any]:
@@ -108,3 +140,41 @@ def mutate(review: AdmissionReviewPayload) -> dict[str, Any]:
     if not patches:
         return _allow(uid)
     return _patch_response(uid, patches)
+
+
+@app.post("/backfill")
+@app.post("/api/v1/backfill")
+def backfill(body: BackfillRequestBody):
+    """Backfill 404 layers of a target index via same-registry cross-mounts.
+
+    Always returns a structured report; ``complete`` is false when one or more
+    layers still fail digest/size verification.  Request/precondition errors
+    are returned as 4xx with ``{"detail": ...}``.
+    """
+    try:
+        report = backfill_service.backfill(body.target, body.sources)
+    except BackfillRequestError as exc:
+        logger.warning("backfill rejected (%s): %s", exc.status_code, exc.message)
+        return JSONResponse(
+            status_code=exc.status_code, content={"detail": exc.message}
+        )
+    except Exception:
+        logger.exception("unexpected backfill error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "回补 API 内部错误, 详见 webhook 日志"},
+        )
+    payload = report.to_dict()
+    if payload["complete"]:
+        logger.info(
+            "backfill complete for %s: %s",
+            payload["target"],
+            payload["summary"],
+        )
+    else:
+        logger.warning(
+            "backfill incomplete for %s: %d layer(s) failed",
+            payload["target"],
+            payload["summary"]["failed"],
+        )
+    return payload
